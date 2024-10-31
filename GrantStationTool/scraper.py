@@ -8,9 +8,13 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from results_window import ResultsWindow
+from filter_manager import FilterManager, SearchFilter 
+from datetime import datetime, timedelta
+import textwrap
 import requests
 import json
 import time
+import re
 
 class GrantStationScraper:
     def __init__(self, username, password):
@@ -25,6 +29,120 @@ class GrantStationScraper:
         self.results_text = ""
         self.debug_mode = False
         self.debug_text = ""
+        self.filter_manager = FilterManager()
+        self.current_filter = None
+
+    def apply_filter_to_results(self, opportunities, filter_obj):
+        """Apply filter to search results"""
+        if not filter_obj:
+            return opportunities
+
+        filtered_results = []
+        for opp in opportunities:
+            matches = True
+            
+            # Check keywords in title and description
+            if filter_obj.keywords:
+                text_to_search = (
+                    f"{opp.get('title', '')} {opp.get('description', '')}".lower()
+                )
+                if not all(kw.lower() in text_to_search for kw in filter_obj.keywords):
+                    if self.debug_mode:
+                        self.debug_text += f"\nDEBUG: {opp.get('title', 'Unknown')} failed keyword match\n"
+                    matches = False
+
+            # Check date ranges
+            if matches and filter_obj.start_date and opp.get('post_date'):
+                try:
+                    # Try multiple date formats
+                    post_date = None
+                    date_formats = ["%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"]
+                    for date_format in date_formats:
+                        try:
+                            post_date = datetime.strptime(opp['post_date'], date_format)
+                            break
+                        except ValueError:
+                            continue
+                    
+                    if post_date and filter_obj.start_date:
+                        filter_start = datetime.strptime(filter_obj.start_date, "%Y-%m-%d")
+                        if post_date < filter_start:
+                            if self.debug_mode:
+                                self.debug_text += f"\nDEBUG: {opp.get('title', 'Unknown')} failed start date check\n"
+                            matches = False
+                except Exception as e:
+                    if self.debug_mode:
+                        self.debug_text += f"\nDEBUG: Date parsing error: {str(e)}\n"
+
+            if matches and filter_obj.end_date and opp.get('close_date'):
+                try:
+                    # Try multiple date formats
+                    close_date = None
+                    date_formats = ["%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"]
+                    for date_format in date_formats:
+                        try:
+                            close_date = datetime.strptime(opp['close_date'], date_format)
+                            break
+                        except ValueError:
+                            continue
+                    
+                    if close_date and filter_obj.end_date:
+                        filter_end = datetime.strptime(filter_obj.end_date, "%Y-%m-%d")
+                        if close_date > filter_end:
+                            if self.debug_mode:
+                                self.debug_text += f"\nDEBUG: {opp.get('title', 'Unknown')} failed end date check\n"
+                            matches = False
+                except Exception as e:
+                    if self.debug_mode:
+                        self.debug_text += f"\nDEBUG: Date parsing error: {str(e)}\n"
+
+            # Check amount range if specified
+            if matches and (filter_obj.min_amount is not None or filter_obj.max_amount is not None):
+                amount = self.extract_amount_from_opportunity(opp)
+                if amount is not None:
+                    if filter_obj.min_amount and amount < filter_obj.min_amount:
+                        if self.debug_mode:
+                            self.debug_text += f"\nDEBUG: {opp.get('title', 'Unknown')} failed minimum amount check\n"
+                        matches = False
+                    if filter_obj.max_amount and amount > filter_obj.max_amount:
+                        if self.debug_mode:
+                            self.debug_text += f"\nDEBUG: {opp.get('title', 'Unknown')} failed maximum amount check\n"
+                        matches = False
+
+            if matches:
+                filtered_results.append(opp)
+
+        return filtered_results
+
+    def extract_amount_from_opportunity(self, opp):
+        """Try to extract funding amount from opportunity details"""
+        import re
+        
+        # Common patterns for money amounts in text
+        patterns = [
+            r'\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:million|M)',  # Matches $X million or $XM
+            r'\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # Matches standard currency format
+        ]
+        
+        text_to_search = f"{opp.get('title', '')} {opp.get('description', '')}"
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text_to_search)
+            if matches:
+                try:
+                    # Take the first match and convert to float
+                    amount_str = matches[0].replace(',', '')
+                    amount = float(amount_str)
+                    
+                    # If it's in millions, multiply accordingly
+                    if 'million' in text_to_search.lower() or 'M' in text_to_search:
+                        amount *= 1_000_000
+                        
+                    return amount
+                except (ValueError, IndexError):
+                    continue
+                    
+        return None
 
     def initialize_driver(self):
         print("Initializing Chrome driver...")
@@ -215,12 +333,6 @@ class GrantStationScraper:
         except:
             return []
 
-    def save_results(self):
-        filename = "grantstation_results.txt"
-        with open(filename, "w", encoding='utf-8') as f:
-            f.write(self.results_text)
-        print(f"Results saved to {filename}")
-
     def start_new_search(self, current_window):
         """Close current results and start new search"""
         current_window.destroy()
@@ -268,41 +380,6 @@ class GrantStationScraper:
             print(f"Error extracting data: {str(e)}")
             return []
 
-    def run(self, urls, debug_mode=False):
-        try:
-            self.debug_mode = debug_mode
-            self.initialize_driver()
-            
-            if self.load_cookies():
-                print("Attempting to use saved cookies...")
-                self.driver.get("https://grantstation.com")
-                time.sleep(3)
-                
-                if "user/login" in self.driver.current_url.lower():
-                    print("Saved cookies expired, logging in again...")
-                    self.initialize_driver()
-                else:
-                    print("Successfully logged in with saved cookies")
-            
-            for url in urls:
-                data = self.extract_grant_info(url)
-                self.results_text += f"\nResults for {url}:\n"
-                for item in data:
-                    self.results_text += json.dumps(item, indent=2) + "\n\n"
-            
-            results_window = ResultsWindow(
-                self.results_text,
-                self.debug_text,
-                self.debug_mode,
-                lambda: self.start_new_search(results_window.window),
-                self.save_results
-            )
-            results_window.display()
-            
-        finally:
-            if self.driver:
-                self.driver.quit()
-
     def load_cookies(self):
         try:
             with open('grantstation_cookies.json', 'r') as f:
@@ -325,3 +402,128 @@ class GrantStationScraper:
             with open('grantstation_cookies.json', 'w') as f:
                 json.dump(cookies, f)
             print("Cookies saved successfully")
+
+    def save_results(self):
+        """Save both filtered and all results to separate files"""
+        try:
+            # Save filtered results
+            with open("filtered_results.txt", "w", encoding='utf-8') as f:
+                f.write(self.filtered_results_text)
+            
+            # Save all results
+            with open("all_results.txt", "w", encoding='utf-8') as f:
+                f.write(self.all_results_text)
+                
+            print("Results saved successfully!")
+        except Exception as e:
+            print(f"Error saving results: {str(e)}")
+
+    def format_opportunity(self, opp):
+        """Format a single opportunity in a readable way"""
+        formatted = "\n" + "="*80 + "\n"
+        formatted += f"Opportunity Title: {opp.get('title', 'N/A')}\n"
+        formatted += "-"*40 + "\n\n"
+        
+        # Main details
+        formatted += "OVERVIEW\n"
+        formatted += "-"*8 + "\n"
+        formatted += f"Agency: {opp.get('agency', 'N/A')}\n"
+        formatted += f"Opportunity Number: {opp.get('opportunity_number', 'N/A')}\n"
+        formatted += f"Post Date: {opp.get('post_date', 'N/A')}\n"
+        formatted += f"Close Date: {opp.get('close_date', 'N/A')}\n\n"
+        
+        # Description
+        formatted += "DESCRIPTION\n"
+        formatted += "-"*11 + "\n"
+        description = opp.get('description', 'No description available.')
+        # Wrap description text at 80 characters
+        wrapped_desc = '\n'.join(textwrap.wrap(description, width=80))
+        formatted += f"{wrapped_desc}\n\n"
+        
+        # Eligible Applicants
+        formatted += "ELIGIBLE APPLICANTS\n"
+        formatted += "-"*18 + "\n"
+        eligible = opp.get('eligible_applicants', [])
+        if eligible:
+            for applicant in eligible:
+                formatted += f"• {applicant}\n"
+        else:
+            formatted += "No eligibility information available.\n"
+        formatted += "\n"
+        
+        # Additional Information
+        formatted += "ADDITIONAL INFORMATION\n"
+        formatted += "-"*21 + "\n"
+        if opp.get('cfda_numbers'):
+            formatted += f"CFDA Numbers: {', '.join(opp.get('cfda_numbers', []))}\n"
+        if opp.get('grants_gov_url'):
+            formatted += f"Grants.gov URL: {opp.get('grants_gov_url')}\n"
+        if opp.get('additional_info_url'):
+            formatted += f"Additional Information: {opp.get('additional_info_url')}\n"
+            
+        formatted += "\n" + "="*80 + "\n"
+        return formatted
+
+    def run(self, urls, debug_mode=False, search_filter=None):
+        """Updated run method with better formatting"""
+        try:
+            self.debug_mode = debug_mode
+            self.current_filter = search_filter
+            self.initialize_driver()
+            
+            if self.load_cookies():
+                print("Attempting to use saved cookies...")
+                self.driver.get("https://grantstation.com")
+                time.sleep(3)
+                
+                if "user/login" in self.driver.current_url.lower():
+                    print("Saved cookies expired, logging in again...")
+                    self.initialize_driver()
+                else:
+                    print("Successfully logged in with saved cookies")
+            
+            all_results = []
+            filtered_results = []
+            all_results_text = ""
+            filtered_results_text = ""
+
+            # Add imports at top of file
+            import textwrap
+            
+            for url in urls:
+                data = self.extract_grant_info(url)
+                all_results.extend(data)
+                
+                # Format all results
+                all_results_text += f"\nSearch Results from {url}:\n\n"
+                for item in data:
+                    all_results_text += self.format_opportunity(item)
+                
+                # Apply filter if one is selected
+                if self.current_filter:
+                    filtered_data = self.apply_filter_to_results(data, self.current_filter)
+                    filtered_results.extend(filtered_data)
+                    
+                    # Format filtered results
+                    if filtered_data:  # Only add header if there are results
+                        filtered_results_text += f"\nFiltered Results matching '{self.current_filter.name}':\n\n"
+                        for item in filtered_data:
+                            filtered_results_text += self.format_opportunity(item)
+                else:
+                    filtered_results = all_results
+                    filtered_results_text = all_results_text
+
+            # Create the results window with both sets of results
+            results_window = ResultsWindow(
+                filtered_results_text,
+                all_results_text,
+                self.debug_text,
+                self.debug_mode,
+                lambda: self.start_new_search(results_window.window),
+                self.save_results
+            )
+            results_window.display()
+            
+        finally:
+            if self.driver:
+                self.driver.quit()

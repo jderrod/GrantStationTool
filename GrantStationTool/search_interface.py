@@ -10,6 +10,7 @@ class SearchInterface:
         self.root = tk.Tk()
         self.root.title("GrantStation Search")
         self.root.geometry("600x400")
+        self.selected_filter = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -41,6 +42,22 @@ class SearchInterface:
         self.search_entry = ttk.Entry(search_frame, width=50)
         self.search_entry.pack(pady=5)
         
+        # Filter button
+        filter_button = ttk.Button(
+            search_frame,
+            text="Select Filter",
+            command=self.open_filter_window
+        )
+        filter_button.pack(pady=5)
+        
+        # Filter status label
+        self.filter_label = ttk.Label(
+            search_frame,
+            text="No filter selected",
+            font=('Helvetica', 9, 'italic')
+        )
+        self.filter_label.pack(pady=5)
+        
         # Add debug checkbox
         self.debug_var = tk.BooleanVar()
         debug_checkbox = ttk.Checkbutton(
@@ -50,9 +67,6 @@ class SearchInterface:
         )
         debug_checkbox.pack(pady=5)
         
-        # Bind Enter key to search function
-        self.search_entry.bind('<Return>', lambda e: self.perform_search())
-
         # Search button
         search_button = ttk.Button(
             search_frame,
@@ -68,6 +82,21 @@ class SearchInterface:
             font=('Helvetica', 9, 'italic')
         )
         self.status_label.pack(pady=10)
+        
+        # Bind Enter key to search function
+        self.search_entry.bind('<Return>', lambda e: self.perform_search())
+
+    def open_filter_window(self):
+        from filter_manager import FilterWindow
+        
+        def on_filter_selected(filter_obj):
+            self.selected_filter = filter_obj
+            self.filter_label.config(
+                text=f"Selected filter: {filter_obj.name}",
+                foreground="green"
+            )
+            
+        filter_window = FilterWindow(self.root, on_filter_selected)
 
     def perform_search(self):
         search_term = self.search_entry.get().strip()
@@ -78,8 +107,8 @@ class SearchInterface:
             self.status_label.config(text="Starting search...")
             self.root.update()
             
-            # Pass both URL and debug flag to callback
-            self.callback([url], self.debug_var.get())
+            # Pass URL, debug flag, and selected filter to callback
+            self.callback([url], self.debug_var.get(), self.selected_filter)
             self.root.destroy()
         else:
             self.status_label.config(text="Please enter a search term")
