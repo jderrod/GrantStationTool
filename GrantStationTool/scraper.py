@@ -22,6 +22,7 @@ class GrantStationScraper:
         self.password = password
         self.chrome_options = Options()
         self.chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        self.chrome_options.add_argument("--headless=new")
         self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         self.chrome_options.add_experimental_option('useAutomationExtension', False)
         self.driver = None
