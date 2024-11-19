@@ -115,7 +115,7 @@ class SearchWindow(QMainWindow):
         sys.stdout = self.console_output  # Redirect print statements to the QTextEdit
 
 
-    def filter_button_clicked():
+    def filter_button_clicked(self):
         print("clicked")
 
 
